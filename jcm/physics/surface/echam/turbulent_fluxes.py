@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.thermodynamics import saturation_specific_humidity
 from .surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes, SurfaceResistances, SurfaceDiagnostics
@@ -288,24 +289,30 @@ def compute_surface_diagnostics(
     """
     if params is None:  # not a def default: it would build jax arrays at import (#859)
         params = SurfaceParameters.default()
-    ncol, nsfc_type = surface_state.temperature.shape
-    
-    # Reference heights
-    z_2m = 2.0    # 2m for temperature/humidity
-    z_10m = 10.0  # 10m for wind
-    
-    # Grid-box mean surface temperature
-    temp_surface_mean = jnp.sum(surface_state.fraction * surface_state.temperature, axis=1)
-    
-    # Simple linear interpolation for 2m temperature
-    # T_2m = T_surface + (T_air - T_surface) * (z_2m / z_ref)
-    temp_2m = temp_surface_mean + (atmospheric_state.temperature - temp_surface_mean) * (z_2m / z_10m)
-    
-    # 2m humidity (similar approach)
-    q_surface_mean = compute_surface_humidity(
-        temp_surface_mean[:, None], atmospheric_state.pressure
-    )[:, 0]
-    humidity_2m = q_surface_mean + (atmospheric_state.humidity - q_surface_mean) * (z_2m / z_10m)
+    ncol, _ = surface_state.temperature.shape
+    # ICON mo_surface_diag::nsurf_diag (ECHAM postproc_land/ocean/ice):
+    # interpolate dry static energy, then subtract the diagnostic geopotential.
+    # When the lowest level is below 2 m, diagnose at that level rather than
+    # extrapolating beyond the available surface layer.
+    z_diag = jnp.minimum(jnp.maximum(atmospheric_state.reference_height, 0.0), 2.0)
+    t_surface = surface_state.temperature
+    h_difference = (c.cpd * (atmospheric_state.temperature[:, None] - t_surface)
+                    + c.grav * atmospheric_state.reference_height[:, None])
+    temp_2m_tile = (t_surface + atmospheric_state.heat_2m_reduction * h_difference
+                   / c.cpd - c.grav * z_diag[:, None] / c.cpd)
+    # The reference holds lowest-level relative humidity, not q, constant
+    # along this profile. Its 2 m pressure is the linear hydrostatic estimate.
+    q_air = atmospheric_state.humidity
+    rh = jnp.maximum(q_air / jnp.maximum(saturation_specific_humidity(
+        atmospheric_state.temperature, atmospheric_state.pressure), 1e-12), 1e-12)
+    virtual_factor = 1.0 + c.vtmpc1 * q_air - atmospheric_state.condensate
+    pressure_2m = atmospheric_state.surface_pressure[:, None] * (
+        1.0 - z_diag[:, None] * c.grav
+        / (c.rd * jnp.maximum(temp_2m_tile * virtual_factor[:, None], 1.0)))
+    humidity_2m_tile = rh[:, None] * saturation_specific_humidity(
+        temp_2m_tile, pressure_2m)
+    temp_2m = jnp.sum(surface_state.fraction * temp_2m_tile, axis=1)
+    humidity_2m = jnp.sum(surface_state.fraction * humidity_2m_tile, axis=1)
     
     # 2m dew point (simplified)
     dewpoint_2m = temp_2m - 20.0 * (1.0 - atmospheric_state.humidity / 0.01)
@@ -334,22 +341,6 @@ def compute_surface_diagnostics(
     
     energy_balance_residual = (net_radiation_mean - surface_fluxes.sensible_heat_mean - 
                               surface_fluxes.latent_heat_mean)
-    
-    # Tile-specific diagnostics
-    temp_2m_tile = jnp.zeros((ncol, nsfc_type))
-    humidity_2m_tile = jnp.zeros((ncol, nsfc_type))
-    
-    for isfc in range(nsfc_type):
-        temp_2m_tile = temp_2m_tile.at[:, isfc].set(
-            surface_state.temperature[:, isfc] + 
-            (atmospheric_state.temperature - surface_state.temperature[:, isfc]) * (z_2m / z_10m)
-        )
-        q_sfc = compute_surface_humidity(
-            surface_state.temperature[:, isfc:isfc+1], atmospheric_state.pressure
-        )[:, 0]
-        humidity_2m_tile = humidity_2m_tile.at[:, isfc].set(
-            q_sfc + (atmospheric_state.humidity - q_sfc) * (z_2m / z_10m)
-        )
     
     return SurfaceDiagnostics(
         temperature_2m=temp_2m,

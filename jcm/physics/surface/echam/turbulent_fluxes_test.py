@@ -3,6 +3,10 @@
 import jax
 import pytest
 import jax.numpy as jnp
+import numpy as np
+
+import jcm.constants as c
+from jcm.physics.thermodynamics import saturation_specific_humidity
 
 from jcm.physics.surface.echam.surface_physics import initialize_surface_state
 from jcm.physics.surface.echam.turbulent_fluxes import (
@@ -19,6 +23,8 @@ from jcm.testing import check_gradients
 def _atmospheric_forcing(ncol, nsfc_type, u_wind, v_wind):
     """Lowest-level forcing for a small block of columns."""
     return AtmosphericForcing(
+        reference_height=jnp.full(ncol, 60.0),
+        heat_2m_reduction=jnp.full((ncol, nsfc_type), 0.7),
         temperature=jnp.linspace(290.0, 285.0, ncol),
         humidity=jnp.linspace(0.010, 0.008, ncol),
         u_wind=u_wind,
@@ -54,6 +60,70 @@ def _zero_momentum_fluxes(ncol, nsfc_type):
         sensible_heat_mean=mean, latent_heat_mean=mean,
         momentum_u_mean=mean, momentum_v_mean=mean, evaporation_mean=mean,
     )
+
+
+class TestTwoMetreDiagnostics:
+    """Reference dry-static-energy and relative-humidity profiles (#1148)."""
+
+    def _diagnose(self, atmosphere, surface):
+        return compute_surface_diagnostics(
+            atmosphere, surface, _zero_momentum_fluxes(2, 3), None)
+
+    def test_stable_inversion_uses_live_tile_reductions_and_height(self):
+        atmosphere = _atmospheric_forcing(2, 3, jnp.ones(2), jnp.zeros(2))._replace(
+            temperature=jnp.array([270., 270.]), reference_height=jnp.array([60., 90.]),
+            heat_2m_reduction=jnp.array([[.2, .4, .6], [.3, .5, .7]]))
+        surface = _surface_state(2)._replace(temperature=jnp.full((2, 3), 250.))
+        actual = self._diagnose(atmosphere, surface)
+        expected = 250. + np.asarray(atmosphere.heat_2m_reduction) * (
+            20. + float(c.grav / c.cpd) * np.array([60., 90.])[:, None]
+        ) - 2. * float(c.grav / c.cpd)
+        np.testing.assert_allclose(actual.temperature_2m_tile, expected, atol=3e-5)
+        np.testing.assert_allclose(actual.temperature_2m,
+                                   np.sum(expected * surface.fraction, axis=1), atol=3e-5)
+        assert np.all(np.asarray(actual.temperature_2m_tile) > 250.)
+        assert np.all(np.asarray(actual.temperature_2m_tile) < 270.)
+
+    def test_dry_adiabat_retains_the_two_metre_lapse(self):
+        height = jnp.array([30., 90.])
+        atmosphere = _atmospheric_forcing(2, 3, jnp.ones(2), jnp.zeros(2))._replace(
+            temperature=290. - c.grav * height / c.cpd, reference_height=height)
+        surface = _surface_state(2)._replace(temperature=jnp.full((2, 3), 290.))
+        result = self._diagnose(atmosphere, surface)
+        np.testing.assert_allclose(result.temperature_2m_tile,
+                                   290. - c.grav * 2. / c.cpd, atol=3e-5)
+
+    def test_humidity_preserves_relative_humidity_and_averages_tiles(self):
+        atmosphere = _atmospheric_forcing(2, 3, jnp.ones(2), jnp.zeros(2))._replace(
+            condensate=jnp.array([.001, .002]))
+        surface = _surface_state(2)
+        result = self._diagnose(atmosphere, surface)
+        t2 = result.temperature_2m_tile
+        p2 = atmosphere.surface_pressure[:, None] * (1. - 2. * c.grav / (
+            c.rd * t2 * (1. + c.vtmpc1 * atmosphere.humidity[:, None]
+                         - atmosphere.condensate[:, None])))
+        actual_rh = result.humidity_2m_tile / saturation_specific_humidity(t2, p2)
+        expected_rh = atmosphere.humidity / saturation_specific_humidity(
+            atmosphere.temperature, atmosphere.pressure)
+        np.testing.assert_allclose(actual_rh,
+                                   np.broadcast_to(expected_rh[:, None], (2, 3)),
+                                   rtol=2e-6)
+        np.testing.assert_allclose(result.humidity_2m,
+                                   jnp.sum(surface.fraction * result.humidity_2m_tile, axis=1),
+                                   rtol=2e-6)
+
+    def test_calm_dry_column_and_temperature_gradient_are_finite(self):
+        atmosphere = _atmospheric_forcing(2, 3, jnp.zeros(2), jnp.zeros(2))._replace(
+            humidity=jnp.zeros(2))
+        surface = _surface_state(2)
+
+        def temperature(t):
+            return self._diagnose(atmosphere._replace(temperature=t), surface).temperature_2m.sum()
+
+        result = self._diagnose(atmosphere, surface)
+        assert jnp.all(jnp.isfinite(result.humidity_2m))
+        gradient = jax.grad(temperature)(atmosphere.temperature)
+        np.testing.assert_allclose(gradient, .7, atol=2e-6)
 
 
 class TestBulkRichardsonNumber:

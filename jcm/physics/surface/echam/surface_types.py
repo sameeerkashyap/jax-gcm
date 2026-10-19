@@ -133,6 +133,9 @@ class AtmosphericForcing(NamedTuple):
     exchange_coeff_heat: jnp.ndarray     # Heat exchange [m²/s] (ncol, nsfc_type)
     exchange_coeff_moisture: jnp.ndarray # Moisture exchange [m²/s] (ncol, nsfc_type)
     exchange_coeff_momentum: jnp.ndarray # Momentum exchange [m²/s] (ncol, nsfc_type)
+    reference_height: jnp.ndarray  # Lowest-level height above surface [m] (ncol,)
+    heat_2m_reduction: jnp.ndarray  # Live heat-profile factor [-] (ncol, nsfc_type)
+    condensate: jnp.ndarray | float = 0.0  # Lowest-level qc + qi [kg/kg]
 
 
 class SurfaceFluxes(NamedTuple):

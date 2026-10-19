@@ -72,6 +72,29 @@ sea-ice configuration is out of scope.
 ``turbulent_fluxes_test.py``, ``surface_types_test.py``. The ``pev_vdiff``
 delivered-equals-reported identity is exercised through the vdiff column tests.
 
+## Two-metre temperature and humidity
+
+The tile diagnostics use the stability-corrected surface-layer profile of
+ECHAM/ICON `mo_surface_diag::nsurf_diag`. The turbulence term computes the
+2 m reduction with its own live heat and momentum exchange velocities and
+neutral coefficients, including the same roughness lengths and wind floor.
+The corrected heat factor is `bh = kappa sqrt(CM) / CH`; heat and momentum
+stability cannot be interchanged. The neutral diagnostic factor is
+`kappa/sqrt(CHN)` over land and `kappa/sqrt(CMN)` over water and ice, as in
+the reference routine.
+
+Temperature follows a dry-static-energy profile (`cp T + g z`), with the
+2 m geopotential removed after interpolation. Humidity preserves the
+lowest-level relative humidity and evaluates the shared Sonntag saturation
+law at the tile's diagnosed temperature and hydrostatic 2 m pressure.
+Grid means are fraction-weighted sums of the tile diagnostics, so saturation
+is evaluated before averaging. A lowest level below 2 m is used directly
+rather than extrapolating beyond the resolved surface layer.
+
+These calculations are diagnostic only: they do not change turbulent fluxes
+or atmospheric tendencies. Publishing the surface diagnostic bundle is tracked
+separately in #1140.
+
 ## The ECHAM land tile
 
 **What we do.** The ECHAM hosts' land is a *prescribed-moisture land*

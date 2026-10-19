@@ -475,7 +475,7 @@ class EchamSurface(PhysicsTerm):
     name: ClassVar[str] = "echam_surface"
     category: ClassVar[str] = "surface"
     requires: ClassVar[tuple[str, ...]] = (
-        "pressure_full", "pressure_half", "height_full",
+        "pressure_full", "pressure_half", "height_full", "height_half",
         "vertical_diffusion", "radiation", "surface",
     )
     provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
@@ -607,11 +607,7 @@ class EchamSurface(PhysicsTerm):
         atm_v = state.v_wind[-1, :]
         atm_p = pressure_full[-1, :]
 
-        # Reference height ≥ 10 m (kept for parity with the legacy code; the
-        # surface scheme does not actually consume it through this path).
-        _ref_height = jnp.maximum(
-            height_full[-1, :] - height_full[-1, :].min(), 10.0,
-        )
+        ref_height = height_full[-1, :] - diagnostics["height_half"][-1, :]
 
         vdiff = diagnostics["vertical_diffusion"]
         exchange_coeff_heat = vdiff.surface_exchange_heat.reshape(
@@ -639,6 +635,10 @@ class EchamSurface(PhysicsTerm):
             exchange_coeff_heat=exchange_coeff_heat,
             exchange_coeff_moisture=exchange_coeff_moisture,
             exchange_coeff_momentum=exchange_coeff_momentum,
+            reference_height=ref_height,
+            heat_2m_reduction=vdiff.heat_2m_reduction.reshape(ncols, nsfc_type),
+            condensate=(diagnostics["clouds"].qc[-1] + diagnostics["clouds"].qi[-1]
+                        if "clouds" in diagnostics else jnp.zeros(ncols)),
         )
 
         # Albedo/radiative/tile bookkeeping, PLUS the explicit ECHAM bulk-
